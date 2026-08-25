@@ -148,3 +148,58 @@ Tudo fica em `~/.asaas-deck/`:
 | `backend.log` | saída do backend (sobrescrito a cada Iniciar) |
 | `task.log` | saída da última limpeza |
 | `start-backend.sh` | script gerado pelo botão Iniciar |
+| `config.json` | suas configurações (opcional) |
+
+## Como funciona por dentro
+
+`ThreadingHTTPServer` da biblioteca padrão servindo uma página estática e uma API mínima:
+
+| Rota | O que faz |
+|---|---|
+| `GET /api/status` | estado do backend, IP, dependências, apps mobile e OTP |
+| `GET /api/logs` | log tratado |
+| `POST /api/start` \| `/stop` \| `/clean` \| `/daemon` | ações |
+| `POST /api/inject-ip` | grava o IP nos `DebugSettings.cs` |
+| `POST /api/set-email` | grava o `LoginUsername` de um app |
+
+O estado das portas vem de uma única chamada de `lsof` com cache de 2 s — quatro chamadas separadas
+a cada refresh custavam ~5 s por atualização.
+
+## Desenvolvimento
+
+O HTML/CSS/JS fica na constante `PAGE`, dentro do próprio `asaas-deck`. Para mexer na interface,
+edite essa string e reinicie o processo — não há build.
+
+Antes de abrir um PR, rode as mesmas verificações do CI:
+
+```bash
+python3 -m py_compile asaas-deck
+zsh -n install.sh
+python3 .github/scripts/check_page.py
+```
+
+O `check_page.py` protege contra dois erros silenciosos: um `"""` no HTML quebrando a string
+Python, e a remoção de um elemento que o JavaScript da página procura por id.
+
+## Problemas comuns
+
+**`Address already in use`** — já existe um AsaasDeck rodando; abra <http://localhost:7070>. Se for
+outro processo, use `ASAAS_DECK_PORT=7071 asaas-deck`.
+
+**`asaas-deck: command not found`** — `~/.local/bin` não está no `PATH`. Abra um terminal novo ou
+rode `source ~/.zshrc`.
+
+**Botão Iniciar não faz nada** — falta autorização de Automação para o terminal (a mensagem no
+painel diz isso). Libere em Ajustes do Sistema > Privacidade e Segurança > Automação.
+
+**Dependências em vermelho** — banco e cache não estão de pé. Suba os containers do projeto.
+
+**Status fica em "iniciando" por muito tempo** — normal depois de uma limpeza: um build completo
+leva vários minutos. Acompanhe na janela do terminal.
+
+**O log não atualiza** — o backend em execução escreve no arquivo aberto quando ele subiu. Se o
+`backend.log` foi substituído no meio do caminho, o log volta a aparecer no próximo Iniciar.
+
+## Licença
+
+MIT — veja [LICENSE](LICENSE).

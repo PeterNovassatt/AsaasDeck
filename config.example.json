@@ -1,0 +1,11 @@
+{
+  "core_dir": "~/Documents/Asaas/asaas-core",
+  "asaasmobile_dir": "~/Documents/AsaasMobile",
+  "asaasmobile_platform_dir": "~/Documents/AsaasMobile-Platform",
+  "deck_port": 7070,
+  "app_port": 8083,
+  "java": "8.0.442-tem",
+  "grails": "4.1.3",
+  "term_delay": 5,
+  "terminal": "Terminal"
+}
