@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.3.0
+
+Diagnóstico do Rider, motivado pelo caso em que build, deploy e debug param de responder e o botão
+de cancelar build fica aceso para sempre: uma janela do Rider que morreu mal deixa o `Rider.Backend`
+vivo, sem pai, ainda segurando a solution — junto com os nós de MSBuild e os workers pendurados nele.
+
+- Card próprio para o **Rider**, com o estado (`ativo`, `processos presos` ou `fechado`) e a lista
+  de sobras: PID, o que cada processo é e há quanto tempo está vivo
+- Botão **Diagnosticar**, que só lê: escreve no log a janela em uso, o backend dela, cada processo
+  preso com o dono, os build servers do dotnet e um veredito com a ação sugerida
+- Botão **Reiniciar Rider**, com confirmação, que fecha o Rider pelo `osascript` (preservando abas,
+  breakpoints e a última solution), mata os processos presos apurados antes pelo PID, varre os
+  backends remanescentes, derruba os build servers do dotnet e reabre o Rider
+- O que conta como preso é o backend sem janela viva (`ppid` 1) e o que estiver pendurado nele. A
+  idade de um nó de MSBuild sob um backend em uso não é sinal de nada — ele vive o que a sessão viver
+- O `ps` do macOS não tem a coluna `etimes`; o painel converte o `etime` (`[[dd-]hh:]mm:ss`)
+- Nova chave de configuração: `rider_app`
+
 ## 0.2.0
 
 Diagnóstico do Docker, motivado pelo caso que mais custa tempo: a VM do Rancher Desktop congelar

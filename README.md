@@ -1,8 +1,8 @@
 # AsaasDeck
 
 Painel local, no navegador, para gerenciar um backend Grails de desenvolvimento — ver status,
-iniciar, parar e limpar, acompanhar o log, diagnosticar o Docker quando ele cai e manter os apps
-mobile apontando para o IP certo da máquina.
+iniciar, parar e limpar, acompanhar o log, diagnosticar o Docker quando ele cai, destravar o Rider
+quando ele para de responder e manter os apps mobile apontando para o IP certo da máquina.
 
 ![AsaasDeck](docs/screenshot.png)
 
@@ -80,6 +80,32 @@ Se o `rdctl shutdown` ficar pendurado — o que acontece com a VM congelada, já
 guest — o painel espera 45 segundos e então derruba os processos do QEMU e do hostagent. O
 `rdctl` é procurado dentro do bundle do Rancher Desktop, porque o instalador não o coloca no PATH;
 se o seu estiver em outro lugar, aponte com `ASAAS_RDCTL`.
+
+### Rider travado
+
+O Rider trava de um jeito silencioso: a janela some, mas o `Rider.Backend` continua vivo — agora sem
+pai — segurando a mesma solution. O sintoma é o botão de cancelar build (o martelo com a barra) aceso
+o tempo todo, com build, deploy e debug sem sair do lugar.
+
+O card do Rider mostra o estado e, quando há sobras, lista cada uma com PID, tipo e idade:
+
+| Estado | O que significa |
+|---|---|
+| **ativo** | há uma janela do Rider e nada preso |
+| **processos presos** | backends sem janela, ou workers e nós de MSBuild pendurados neles |
+| **fechado** | o Rider não está em execução |
+
+**Diagnosticar** não encerra nada: escreve no log a janela em uso e o backend dela, cada processo
+preso com o dono, os build servers do dotnet e um veredito.
+
+**Reiniciar Rider** (pede confirmação) fecha o Rider pelo `osascript`, o que preserva abas,
+breakpoints e a última solution; só o que não fechar no prazo é encerrado à força. Depois mata os
+processos presos — apurados por PID antes de começar, em vez de varrer por padrão —, limpa os
+backends remanescentes, derruba os build servers do dotnet e reabre o Rider. **Salve o que estiver
+aberto antes de clicar.**
+
+O `.app` é procurado em `/Applications` e em `~/Applications` (Toolbox); se o seu estiver em outro
+lugar, aponte com `ASAAS_RIDER_APP`.
 
 ### Iniciar, parar e limpar
 
@@ -189,6 +215,7 @@ ASAAS_TERM_DELAY=8 asaas-deck          # mais tempo antes de injetar o comando
 | `start_cmd` | ver abaixo | comando alternativo de start |
 | `rdctl` | autodetectado | caminho do `rdctl` do Rancher Desktop |
 | `compose_dir` | `~/Documents/docker/containers` | pasta do `docker-compose.yaml` |
+| `rider_app` | autodetectado | caminho do `Rider.app` |
 
 ## Arquivos criados
 
@@ -197,7 +224,7 @@ Tudo fica em `~/.asaas-deck/`:
 | Arquivo | Conteúdo |
 |---|---|
 | `backend.log` | saída do backend (sobrescrito a cada Iniciar) |
-| `task.log` | saída da última limpeza |
+| `task.log` | saída da última limpeza, reinício do Docker ou diagnóstico do Rider |
 | `start-backend.sh` | script gerado pelo botão Iniciar |
 | `config.json` | suas configurações (opcional) |
 
