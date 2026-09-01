@@ -1,8 +1,8 @@
 # AsaasDeck
 
 Painel local, no navegador, para gerenciar um backend Grails de desenvolvimento — ver status,
-iniciar, parar e limpar, acompanhar o log e manter os apps mobile apontando para o IP certo da
-máquina.
+iniciar, parar e limpar, acompanhar o log, diagnosticar o Docker quando ele cai e manter os apps
+mobile apontando para o IP certo da máquina.
 
 ![AsaasDeck](docs/screenshot.png)
 
@@ -52,8 +52,34 @@ Para atualizar: `git pull && ./install.sh`.
 
 O bloco da direita mostra o estado do backend — **rodando**, **iniciando** ou **parado** — com PID,
 tempo de execução e o código HTTP que a aplicação está devolvendo de fato. Abaixo, as dependências
-que precisam estar de pé (MySQL, Redis, Webpack) e o daemon do Gradle. Cada item tem ícone, cor e
-texto, para não depender só de cor.
+que precisam estar de pé (Docker, MySQL, Redis, Webpack) e o daemon do Gradle. Cada item tem ícone,
+cor e texto, para não depender só de cor.
+
+### Docker e o Rancher Desktop
+
+O Docker tem linha própria porque, quando ele cai, o que resolve é saber **por que** caiu:
+
+| Estado | O que significa |
+|---|---|
+| **ativo** | o engine responde; mostra a versão |
+| **VM congelada** | o QEMU está vivo mas o engine não responde — típico depois que o Mac suspende |
+| **VM parada** | o Rancher Desktop está aberto, mas a VM não subiu |
+| **Rancher fechado** | o aplicativo não está em execução |
+
+O diagnóstico é feito só com sinais do host: processos do QEMU e do hostagent, resposta do
+`docker info` e a idade do `serial.log` da VM. Nada consulta o guest de propósito — `limactl shell`
+fica pendurado por minutos justamente quando a VM está congelada, que é quando você precisa da
+resposta.
+
+Nos três estados de falha aparece o botão **Reiniciar Docker** (pede confirmação). Ele encerra a VM,
+reabre o Rancher Desktop, espera o engine responder e sobe os containers do `docker-compose.yaml`.
+Containers em execução são interrompidos; **imagens e volumes são preservados**, porque vivem no
+disco da VM.
+
+Se o `rdctl shutdown` ficar pendurado — o que acontece com a VM congelada, já que ele depende do
+guest — o painel espera 45 segundos e então derruba os processos do QEMU e do hostagent. O
+`rdctl` é procurado dentro do bundle do Rancher Desktop, porque o instalador não o coloca no PATH;
+se o seu estiver em outro lugar, aponte com `ASAAS_RDCTL`.
 
 ### Iniciar, parar e limpar
 
@@ -65,8 +91,8 @@ texto, para não depender só de cor.
 | **Encerrar daemon Gradle** | Mata daemons órfãos que ficam segurando locks do build |
 
 O **Iniciar** abre uma janela do seu terminal (iTerm2 se você tiver, senão o Terminal do macOS),
-espera 5 segundos e executa um script gerado em `~/.asaas-deck/start-backend.sh`. Isso não é
-capricho: o `grails run-app` não conclui o startup sem um terminal de verdade — sem TTY ele fica
+espera 5 segundos e executa o comando de start (veja a seção seguinte). Abrir um terminal não é
+capricho: o `grails run-app` não conclui o startup sem um TTY de verdade — sem ele o processo fica
 pendurado indefinidamente no `bootRun`.
 
 Duas consequências boas: o build fica visível na janela, então você acompanha e pode interromper com
@@ -74,6 +100,29 @@ Ctrl+C; e o backend não morre se você fechar o painel, porque os processos sã
 
 Na primeira vez o macOS pede autorização para o AsaasDeck controlar o terminal — aceite. Se recusar
 por engano, libere em **Ajustes do Sistema > Privacidade e Segurança > Automação**.
+
+### Qual comando o Iniciar executa
+
+Na ordem, o primeiro que existir:
+
+1. `start_cmd`, se você definiu no config ou por variável de ambiente
+2. `run-asaas-tee` — se você tem esse atalho no shell
+3. `run-asaas` — se você tem esse atalho no shell
+4. `~/.asaas-deck/start-backend.sh`, gerado pelo próprio painel
+
+A vantagem de um atalho seu é ver no terminal o comando que você já conhece. Só lembre que o
+painel lê o log de `~/.asaas-deck/backend.log`: se o seu atalho não escreve lá, o log e o card de
+OTP ficam vazios (o status, o IP e as dependências continuam funcionando). Para ter os dois, faça
+o atalho espelhar a saída — em fish:
+
+```fish
+function run-asaas-tee
+    mkdir -p $HOME/.asaas-deck
+    run-asaas &| tee $HOME/.asaas-deck/backend.log
+end
+```
+
+Em zsh ou bash, troque `&|` por `2>&1 |`.
 
 ### IP e e-mail dos apps mobile
 
@@ -137,7 +186,9 @@ ASAAS_TERM_DELAY=8 asaas-deck          # mais tempo antes de injetar o comando
 | `term_delay` | `5` | segundos antes de injetar o comando |
 | `terminal` | iTerm2 se existir | `iTerm` ou `Terminal` |
 | `otp_regex` | heurística | padrão de extração do código OTP |
-| `start_cmd` | script gerado | comando alternativo de start |
+| `start_cmd` | ver abaixo | comando alternativo de start |
+| `rdctl` | autodetectado | caminho do `rdctl` do Rancher Desktop |
+| `compose_dir` | `~/Documents/docker/containers` | pasta do `docker-compose.yaml` |
 
 ## Arquivos criados
 
@@ -161,6 +212,7 @@ Tudo fica em `~/.asaas-deck/`:
 | `POST /api/start` \| `/stop` \| `/clean` \| `/daemon` | ações |
 | `POST /api/inject-ip` | grava o IP nos `DebugSettings.cs` |
 | `POST /api/set-email` | grava o `LoginUsername` de um app |
+| `POST /api/docker-fix` | reinicia a VM do Rancher e sobe os containers |
 
 O estado das portas vem de uma única chamada de `lsof` com cache de 2 s — quatro chamadas separadas
 a cada refresh custavam ~5 s por atualização.
@@ -192,7 +244,9 @@ rode `source ~/.zshrc`.
 **Botão Iniciar não faz nada** — falta autorização de Automação para o terminal (a mensagem no
 painel diz isso). Libere em Ajustes do Sistema > Privacidade e Segurança > Automação.
 
-**Dependências em vermelho** — banco e cache não estão de pé. Suba os containers do projeto.
+**Dependências em vermelho** — banco e cache não estão de pé. Se a linha do Docker também
+estiver fora, resolva o Docker primeiro: o estado mostrado diz o que fazer, e o botão **Reiniciar
+Docker** cobre o caso da VM congelada.
 
 **Status fica em "iniciando" por muito tempo** — normal depois de uma limpeza: um build completo
 leva vários minutos. Acompanhe na janela do terminal.

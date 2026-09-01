@@ -62,6 +62,20 @@ def _find_mobile():
     return out
 
 
+def _find_rdctl():
+    """rdctl não entra no PATH pelo instalador do Rancher; mora dentro do app bundle."""
+    explicit = setting("rdctl")
+    if explicit:
+        return os.path.expanduser(explicit)
+    for cand in ("/Applications/Rancher Desktop.app/Contents/Resources/resources/darwin/bin/rdctl",
+                 os.path.join(HOME, "Applications/Rancher Desktop.app/Contents/Resources/"
+                                    "resources/darwin/bin/rdctl"),
+                 os.path.join(HOME, ".rd/bin/rdctl")):
+        if os.path.isfile(cand):
+            return cand
+    return ""
+
+
 PROJECT = _find_project()
 WEB = os.path.join(PROJECT, "web")
 BACKEND_LOG = os.path.join(STATE, "backend.log")
@@ -73,12 +87,26 @@ TERM_DELAY = int(setting("term_delay", 5))
 JAVA = setting("java", "8.0.442-tem")
 GRAILS = setting("grails", "4.1.3")
 MOBILE_FILES = _find_mobile()
+RDCTL = _find_rdctl()
+COMPOSE_DIR = os.path.expanduser(setting("compose_dir", os.path.join(HOME, "Documents/docker/containers")))
+# A VM do Rancher escreve o console serial aqui; parada de escrita é o sinal de congelamento.
+LIMA_SERIAL = os.path.join(
+    HOME, "Library/Application Support/rancher-desktop/lima/0/serial.log")
 IP_RE = re.compile(r'(IP_ADDRESS\s*=\s*")([^"]*)(")')
 EMAIL_RE = re.compile(r'(LoginUsername\s*=>\s*")([^"]*)(")')
 VALID_EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$")
-# provisório até termos a mensagem exata do backend; ajustável por env/config
-OTP_RE = re.compile(setting("otp_regex",
-    r"(?i)(?:otp|c[oó]digo|token|verifica[cç][aã]o)[^0-9\n]{0,60}?(\d{4,8})"))
+# Padrões de OTP em ordem de prioridade. Os lookarounds impedem capturar fatias de
+# números maiores — um telefone de 11 dígitos não é um código de 6.
+OTP_DEFAULTS = [
+    # "Seu código de acesso à conta é: 000000"
+    r"(?i)c[oó]digo\s+de\s+acesso[^0-9\n]{0,40}?(?<!\d)(\d{4,8})(?!\d)",
+    # genérico: palavra-chave seguida do código
+    r"(?i)(?:otp|c[oó]digo|token|verifica[cç][aã]o)[^0-9\n]{0,60}?(?<!\d)(\d{4,8})(?!\d)",
+]
+_otp_override = setting("otp_regex")
+OTP_PATTERNS = [re.compile(_otp_override)] if _otp_override else [re.compile(r) for r in OTP_DEFAULTS]
+# telefone do destinatário, quando a mensagem traz
+PHONE_RE = re.compile(r"(?<!\d)(\d{10,13})(?!\d)")
 
 # grails run-app espera um terminal no startup; `script` aloca um pty
 SDK = ("source $HOME/.sdkman/bin/sdkman-init.sh && "
@@ -181,7 +209,7 @@ def tail(path, n=200):
 
 def active_log():
     """Mostra o log da última ação executada, para o resultado não desaparecer ao terminar."""
-    if _task["name"] == "clean":
+    if _task["name"] in ("clean", "docker-fix"):
         return TASK_LOG
     if _task["name"] == "start":
         return BACKEND_LOG
@@ -266,15 +294,74 @@ def find_otp():
     """Último código OTP visto no log do backend."""
     hit = None
     for line in PROGRESS.sub(" ", read_log(active_log())).split("\n"):
-        m = OTP_RE.search(line)
-        if m:
-            hit = {"code": m.group(1), "line": " ".join(line.split())[-180:]}
+        for pattern in OTP_PATTERNS:
+            m = pattern.search(line)
+            if m:
+                clean = " ".join(line.split())
+                phone = PHONE_RE.search(clean)
+                hit = {"code": m.group(1), "to": phone.group(1) if phone else None,
+                       "line": clean[-180:]}
+                break
     return hit
 
 
 def http_ok():
     code = sh(f"curl -s -o /dev/null -w '%{{http_code}}' --max-time 8 http://localhost:{APP_PORT}/", timeout=12)
     return code if code and code != "000" else ""
+
+
+_docker_cache = {"t": 0.0, "data": None}
+
+# Quanto tempo o console serial da VM pode ficar sem escrita antes de considerarmos
+# o guest travado. O Rancher escreve ali de forma esparsa, então o limite é folgado.
+FROZEN_AFTER = 600
+
+
+def docker_health(ttl=6.0):
+    """Diagnostica o Docker distinguindo *por que* ele está fora, não só *se* está.
+
+    O caso que mais custa tempo é a VM congelada: o processo qemu segue vivo e o
+    `limactl list` reporta Running, mas o guest está morto e o dockerd nunca sobe.
+    Usamos apenas sinais do lado do host — nada aqui pode tocar o guest, porque
+    `limactl shell` trava por minutos exatamente quando a VM está nesse estado.
+    """
+    now = time.time()
+    if _docker_cache["data"] and now - _docker_cache["t"] < ttl:
+        return _docker_cache["data"]
+
+    version = sh("docker info --format '{{.ServerVersion}}' 2>/dev/null", timeout=4)
+    if version:
+        info = {"state": "ok", "version": version, "label": "ativo"}
+    else:
+        vm = bool(sh("pgrep -f 'lima/bin/qemu-system|lima/bin/limactl hostagent'", timeout=3))
+        app = bool(sh("pgrep -f 'Rancher Desktop.app/Contents/MacOS'", timeout=3))
+        if vm:
+            # VM de pé sem engine respondendo: congelada. A idade do serial.log
+            # confirma e vira a explicação mostrada no painel.
+            stale = ""
+            try:
+                age = int(now - os.path.getmtime(LIMA_SERIAL))
+                if age > FROZEN_AFTER:
+                    stale = f"console da VM parado há {_human(age)}"
+            except OSError:
+                pass
+            info = {"state": "frozen", "version": "",
+                    "label": "VM congelada", "detail": stale}
+        elif app:
+            info = {"state": "vm_stopped", "version": "", "label": "VM parada",
+                    "detail": "Rancher aberto, mas a VM não está de pé"}
+        else:
+            info = {"state": "app_closed", "version": "", "label": "Rancher fechado",
+                    "detail": "o Rancher Desktop não está em execução"}
+    info["fixable"] = info["state"] != "ok" and bool(RDCTL)
+    _docker_cache.update(t=now, data=info)
+    return info
+
+
+def _human(seconds):
+    if seconds >= 3600:
+        return f"{seconds // 3600}h{(seconds % 3600) // 60:02d}"
+    return f"{seconds // 60}min"
 
 
 def status():
@@ -308,6 +395,7 @@ def status():
             "Redis (6379)": bool(port_pids(6379)),
             "Webpack (8090)": bool(port_pids(8090)),
         },
+        "docker": docker_health(),
         "gradle_daemon": bool(sh("pgrep -f GradleDaemon")),
         "app_port": APP_PORT,
         "java": JAVA,
@@ -340,6 +428,37 @@ def run_task(name, cmd, log):
 
     threading.Thread(target=worker, daemon=True).start()
     return True, f"{name} iniciado"
+
+
+# Preferimos a variante com tee: mesma coisa que run-asaas, mas espelha a saída no
+# backend.log, o que mantém log e código OTP visíveis no painel.
+START_CANDIDATES = ("run-asaas-tee", "run-asaas")
+
+
+def shell_has(name):
+    probes = (
+        ("/opt/homebrew/bin/fish", ["-l", "-c", f"type -q {name}"]),
+        ("/bin/zsh", ["-l", "-c", f"type {name} >/dev/null 2>&1"]),
+        ("/bin/bash", ["-l", "-c", f"type {name} >/dev/null 2>&1"]),
+    )
+    for shell, args in probes:
+        if not os.path.exists(shell):
+            continue
+        try:
+            if subprocess.run([shell, *args], capture_output=True, timeout=12).returncode == 0:
+                return True
+        except (OSError, subprocess.SubprocessError):
+            continue
+    return False
+
+
+def user_start_function():
+    """Usa o atalho que a pessoa já tem no shell. Sem nenhum deles (colegas com outro
+    setup), o chamador cai no script gerado."""
+    for name in START_CANDIDATES:
+        if shell_has(name):
+            return name
+    return None
 
 
 def write_start_script():
@@ -401,7 +520,7 @@ def action_start():
         _task["name"] = "start"
         _task["started"] = time.time()
     open(BACKEND_LOG, "w").close()
-    cmd = setting("start_cmd") or write_start_script()
+    cmd = setting("start_cmd") or user_start_function() or write_start_script()
     app = terminal_app()
     tpl = ITERM_SCRIPT if app == "iTerm" else TERMINAL_SCRIPT
     script = tpl.format(delay=TERM_DELAY, cmd=cmd.replace("\\", "\\\\").replace('"', '\\"'))
@@ -412,7 +531,8 @@ def action_start():
         if "-1743" in err or "not allowed" in err.lower():
             err += " — autorize em Ajustes > Privacidade e Segurança > Automação."
         return False, f"falha ao abrir o {app}: {err}"
-    return True, f"{app} aberto; o backend inicia em {TERM_DELAY}s"
+    curto = cmd if len(cmd) < 40 else os.path.basename(cmd)
+    return True, f"{app} aberto; '{curto}' roda em {TERM_DELAY}s"
 
 
 def action_stop():
@@ -444,6 +564,53 @@ def action_clean():
 def action_stop_daemon():
     out = sh("pkill -f GradleDaemon && echo ok")
     return True, "daemon do Gradle encerrado" if out else "nenhum daemon rodando"
+
+
+def action_docker_fix():
+    """Derruba a VM travada e sobe tudo de novo, incluindo o MySQL do compose.
+
+    O `rdctl shutdown` encerra a VM por fora — é o que resolve o congelamento sem
+    perder imagens, containers ou volumes, que vivem no disco da VM. Como o backend
+    é QEMU por exigência da VPN (decisão de DevTools), o congelamento pós-suspensão
+    é recorrente e este caminho é o normal de recuperação, não uma medida extrema.
+    """
+    health = docker_health(ttl=0)
+    if health["state"] == "ok":
+        return False, f"Docker já está ativo (engine {health['version']})"
+    if not RDCTL:
+        return False, "rdctl não encontrado — defina ASAAS_RDCTL com o caminho"
+
+    compose = ""
+    if os.path.isfile(os.path.join(COMPOSE_DIR, "docker-compose.yaml")):
+        compose = (f"echo '--- subindo containers' && cd {COMPOSE_DIR} && "
+                   "docker compose up -d")
+    # `rdctl shutdown` tenta encerrar a VM pelo guest — e no estado congelado o guest
+    # é justamente o que não responde, então ele fica pendurado indefinidamente em vez
+    # de falhar. Damos 45s e, se não voltar, derrubamos os processos da VM à força.
+    # Fechar o app costuma levar o qemu junto; o kill cobre o caso de ele ficar órfão.
+    cmd = (f"echo '--- encerrando a VM (até 45s)' && "
+           f"( '{RDCTL}' shutdown & RD=$!; "
+           "  for i in $(seq 1 45); do kill -0 $RD 2>/dev/null || break; sleep 1; done; "
+           "  kill -0 $RD 2>/dev/null && { echo 'shutdown travou — encerrando à força'; "
+           "    kill -TERM $RD 2>/dev/null; } ); "
+           "osascript -e 'quit app \"Rancher Desktop\"' >/dev/null 2>&1 || true; sleep 5; "
+           "pkill -TERM -f 'lima/bin/qemu-system' 2>/dev/null; "
+           "pkill -TERM -f 'lima/bin/limactl hostagent' 2>/dev/null; sleep 5; "
+           "pkill -KILL -f 'lima/bin/qemu-system' 2>/dev/null; "
+           "pkill -KILL -f 'lima/bin/limactl hostagent' 2>/dev/null; sleep 2; "
+           "echo '--- reabrindo o Rancher Desktop' && open -a 'Rancher Desktop' && "
+           # medido: ~90s num restart limpo; a folga cobre boot após kill forçado
+           "echo '--- aguardando o dockerd (até 240s)' && "
+           "for i in $(seq 1 80); do "
+           "  docker info >/dev/null 2>&1 && echo 'engine no ar' && break; "
+           "  sleep 3; done && "
+           "docker info >/dev/null 2>&1 || { echo 'engine nao subiu a tempo'; exit 1; }"
+           + (" && " + compose if compose else ""))
+    ok, msg = run_task("docker-fix", cmd, TASK_LOG)
+    if ok:
+        _docker_cache["t"] = 0.0
+        return True, "reiniciando o Docker — acompanhe no log (leva ~1-2 min)"
+    return ok, msg
 
 
 PAGE = r"""<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
@@ -648,6 +815,30 @@ let busy=null;
 
 function say(t,cls){const m=$('msg');m.textContent=t;m.className=cls||'';}
 
+// O Docker ganha linha própria: quando cai, o que resolve é saber *por quê*.
+function dockerRow(d){
+  if(!d) return '';
+  const ok=d.state==='ok', k=ok?'on':(d.state==='frozen'?'mid':'off');
+  const tone=ok?'ok':(d.state==='frozen'?'warn':'err');
+  let row='<div class="dep"><span class="ico i-'+tone+'">'+ICO[k]+'</span>'
+    +'<span class="nm">Docker</span>'
+    +'<span class="st" style="color:var(--'+tone+')">'
+    +esc(d.label)+'</span></div>';
+  if(ok) return row;
+  if(d.detail) row+='<div class="dep" style="padding-left:26px;color:var(--dim);font-size:12px">'
+    +esc(d.detail)+'</div>';
+  if(d.fixable) row+='<div class="dep" style="padding-left:26px;margin-top:6px">'
+    +'<button class="sm" id="b-docker-fix">Reiniciar Docker</button></div>';
+  return row;
+}
+
+async function fixDocker(btn){
+  if(!confirm('Isto encerra a VM do Rancher e sobe tudo de novo.\n\n'
+    +'Containers em execucao serao interrompidos. Imagens e volumes sao preservados.\n\n'
+    +'Continuar?')) return;
+  await act('docker-fix',btn);
+}
+
 async function act(n,btn){
   const label=btn?btn.innerHTML:null;
   if(btn){btn.disabled=true;btn.innerHTML='<span class="spin"></span>aguarde';}
@@ -759,11 +950,15 @@ async function refresh(){
   }).join('')
   + '<div class="dep"><span class="ico i-'+(s.gradle_daemon?'on':'off')+'">'+ICO[s.gradle_daemon?'on':'off']+'</span>'
   + '<span class="nm">Gradle daemon</span><span class="st" style="color:var(--'+(s.gradle_daemon?'ok':'dim2')+')">'
-  + (s.gradle_daemon?'ativo':'inativo')+'</span></div>';
+  + (s.gradle_daemon?'ativo':'inativo')+'</span></div>'
+  + dockerRow(s.docker);
   $('deps').innerHTML=deps;
+  const df=$('b-docker-fix');
+  if(df) df.onclick=()=>fixDocker(df);
 
   const o=$('otp');
-  if(s.otp&&s.otp.code){o.className='show';$('otpcode').textContent=s.otp.code;$('otpline').textContent=s.otp.line;}
+  if(s.otp&&s.otp.code){o.className='show';$('otpcode').textContent=s.otp.code;
+   $('otpline').textContent=(s.otp.to?('\u2192 '+s.otp.to+'   '):'')+s.otp.line;}
   else{o.className='';}
 
   const starting=s.state==='starting';
@@ -804,7 +999,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         actions = {"/api/start": action_start, "/api/stop": action_stop,
                    "/api/clean": action_clean, "/api/daemon": action_stop_daemon,
-                   "/api/inject-ip": action_inject_ip}
+                   "/api/inject-ip": action_inject_ip,
+                   "/api/docker-fix": action_docker_fix}
         if self.path == "/api/set-email":
             b = self._body()
             ok, msg = action_set_email(b.get("name"), b.get("email"))

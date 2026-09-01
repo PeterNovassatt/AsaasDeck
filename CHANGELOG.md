@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.2.0
+
+Diagnóstico do Docker, motivado pelo caso que mais custa tempo: a VM do Rancher Desktop congelar
+depois que o Mac suspende — o processo do QEMU segue vivo e o `limactl list` reporta `Running`, mas
+o guest está morto e o `dockerd` nunca sobe.
+
+- Linha própria para o **Docker** nas dependências, dizendo *por que* está fora e não só *que* está:
+  `ativo`, `VM congelada`, `VM parada` ou `Rancher fechado`
+- O diagnóstico usa apenas sinais do host — processos do QEMU e do hostagent, resposta do
+  `docker info` e idade do `serial.log` da VM. Nada consulta o guest, porque `limactl shell` fica
+  pendurado por minutos exatamente quando a VM está nesse estado
+- Botão **Reiniciar Docker**, com confirmação, que encerra a VM, reabre o Rancher Desktop, espera o
+  engine responder (até 240 s) e sobe os containers do `docker-compose.yaml`. Imagens, containers e
+  volumes são preservados — eles vivem no disco da VM
+- Quando o `rdctl shutdown` fica pendurado (o que acontece justamente com a VM congelada, porque ele
+  depende do guest), o painel espera 45 s e então derruba os processos do QEMU e do hostagent
+- `rdctl` é localizado dentro do bundle do Rancher Desktop, já que o instalador não o coloca no PATH
+- Novas chaves de configuração: `rdctl` e `compose_dir`
+
 ## 0.1.0
 
 Primeira versão.
